@@ -1,4 +1,4 @@
-from diffusers import StableDiffusionControlNetImg2ImgPipeline, StableDiffusionInpaintPipeline, ControlNetModel, DPMSolverMultistepScheduler
+from diffusers import StableDiffusionControlNetImg2ImgPipeline, StableDiffusionControlNetInpaintPipeline, ControlNetModel, DPMSolverMultistepScheduler
 import torch
 import numpy as np
 from PIL import Image
@@ -7,12 +7,14 @@ from PIL import Image
 
 # ------------------- img2img pipeline -------------------
 
-# ControlNet：Input Segmentation map
-# HuggingFace Doc: [https://huggingface.co/docs/diffusers/en/using-diffusers/controlnet]
+# ControlNet - HuggingFace Doc: [https://huggingface.co/docs/diffusers/en/using-diffusers/controlnet]
+# [https://huggingface.co/lllyasviel/control_v11p_sd15_seg]
 controlnet = ControlNetModel.from_pretrained(
-    "lllyasviel/sd-controlnet-seg", torch_dtype=torch.float16
+    # "lllyasviel/control_v11p_sd15_inpaint"
+    # "control_v11p_sd15_seg",                  # Needs token
+    "lllyasviel/sd-controlnet-seg",
+    torch_dtype=torch.float16
 )
-
 # Backbone: img2img generation (passing a text prompt and an initial image to condition the generation of new images)
 # HuggingFace Doc: [https://huggingface.co/docs/diffusers/en/api/pipelines/stable_diffusion/img2img]
 img2img_pipe = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
@@ -27,10 +29,11 @@ img2img_pipe.scheduler = DPMSolverMultistepScheduler.from_config(
 # ------------------- inpaint pipeline -------------------
 # Backbone: inpainting (edit specific parts of an image by providing a mask and a text prompt)
 # HuggingFace Doc: [https://huggingface.co/docs/diffusers/en/api/pipelines/stable_diffusion/inpaint]
-inpaint_pipe = StableDiffusionInpaintPipeline.from_pretrained(
-    "stabilityai/stable-diffusion-2-inpainting",
+inpaint_pipe = StableDiffusionControlNetInpaintPipeline.from_pretrained(
+    "stable-diffusion-v1-5/stable-diffusion-v1-5",
+    controlnet=controlnet,
     torch_dtype=torch.float16,
-    variant="fp16"
+    use_safetensors=True
 ).to("cuda")
 # Use DPM-Solver++ scheduler for faster and more accurate sampling
 inpaint_pipe.scheduler = DPMSolverMultistepScheduler.from_config(
@@ -102,6 +105,18 @@ def refine_render(rgb_path, seg_path):
 
     out.save(rgb_path.replace(".png", "_refined.png"))
 
+# Prepare the control image from the initial and mask images.
+# Create a tensor to mark the pixels in init_image as masked if the corresponding pixel in mask_image is over a certain threshold.
+def make_inpaint_condition(image, image_mask):
+    image = np.array(image.convert("RGB")).astype(np.float32) / 255.0
+    image_mask = np.array(image_mask.convert("L")).astype(np.float32) / 255.0
+
+    assert image.shape[0:1] == image_mask.shape[0:1]
+    image[image_mask > 0.5] = -1.0  # set as masked pixel
+    image = np.expand_dims(image, 0).transpose(0, 3, 1, 2)
+    image = torch.from_numpy(image)
+    return image
+
 # Perform inpainting on specified mask regions:
 # - Only white regions in mask are edited
 # - Background preserved entirely
@@ -109,6 +124,13 @@ def inpaint_render(rgb_path, seg_path):
     # Load input image and binary mask (single-channel)
     init_image = Image.open(rgb_path).convert("RGB")
     mask = Image.open(seg_path).convert("L")
+
+    # Obtain control_image from mask image
+    control_image = make_inpaint_condition(init_image, mask)
+    # See how control_image looks like:
+    # arr = control_image.squeeze(0).permute(1, 2, 0).cpu().numpy()
+    # arr = ((arr - arr.min()) / (arr.max() - arr.min()) * 255).astype(np.uint8)
+    # Image.fromarray(arr).save("control_img.png")
 
     # Crop to nearest multiples of 8
     w, h = init_image.size
@@ -119,12 +141,11 @@ def inpaint_render(rgb_path, seg_path):
     # Run inpainting: white mask areas are repainted
     out = inpaint_pipe(
         prompt=(
-            "photorealistic, high resolution, realistic lighting and textures person, "
-            "keep original posture"
+            "corgi face with large ears, detailed, pixar, animated, disney"
         ),
-        negative_prompt="low resolution, artifacts, extra objects",
         image=init_image,
         mask_image=mask,
+        control_image=control_image,
         # Control inpaint strength: 0 -> keep the original img, 1 -> Re-generate the whole img
         strength=0.4,
         guidance_scale=7.5,
@@ -134,7 +155,7 @@ def inpaint_render(rgb_path, seg_path):
     out.save(rgb_path.replace(".png", "_inpaint.png"))
 
 #remap_mask_color("masks/seg.png", "masks/seg_person_palette.png", binary_mask=False)
-remap_mask_color("masks/seg.png", "masks/seg_mask_binary.png", binary_mask=True)
+#remap_mask_color("masks/seg.png", "masks/seg_mask_binary.png", binary_mask=True)
 
 #refine_render("images/render.png", "masks/seg_person_palette.png")
-inpaint_render("images/render.png", "masks/seg_mask_binary.png")
+inpaint_render("images/example_img.png", "masks/example_seg_mask_binary.png")
